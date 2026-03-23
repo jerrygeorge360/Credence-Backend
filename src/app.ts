@@ -3,11 +3,16 @@ import { createHealthRouter } from './routes/health.js'
 import { createDefaultProbes } from './services/health/probes.js'
 import trustRouter from './routes/trust.js'
 import bulkRouter from './routes/bulk.js'
+import { createAdminRouter } from './routes/admin/index.js'
 import { validate } from './middleware/validate.js'
+import {
+  buildPaginationMeta,
+  PaginationValidationError,
+  parsePaginationParams,
+} from './lib/pagination.js'
 import {
   bondPathParamsSchema,
   attestationsPathParamsSchema,
-  attestationsQuerySchema,
   createAttestationBodySchema,
 } from './schemas/index.js'
 
@@ -41,11 +46,28 @@ app.get(
 // Attestations – list
 app.get(
   '/api/attestations/:address',
-  validate({ params: attestationsPathParamsSchema, query: attestationsQuerySchema }),
+  validate({ params: attestationsPathParamsSchema }),
   (req, res) => {
     const { address } = req.validated!.params! as { address: string }
-    const { limit, offset } = req.validated!.query! as { limit: number; offset: number }
-    res.json({ address, limit, offset, attestations: [] })
+    try {
+      const { page, limit, offset } = parsePaginationParams(req.query as Record<string, unknown>)
+      res.json({
+        address,
+        attestations: [],
+        offset,
+        ...buildPaginationMeta(0, page, limit),
+      })
+    } catch (error) {
+      if (error instanceof PaginationValidationError) {
+        res.status(400).json({
+          error: 'Validation failed',
+          details: error.details,
+        })
+        return
+      }
+
+      throw error
+    }
   },
 )
 
@@ -65,5 +87,8 @@ app.post(
 
 // Bulk verification (enterprise)
 app.use('/api/bulk', bulkRouter)
+
+// Admin management
+app.use('/api/admin', createAdminRouter())
 
 export default app
