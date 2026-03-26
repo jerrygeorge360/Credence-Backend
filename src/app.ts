@@ -20,6 +20,7 @@ import {
 } from './schemas/index.js'
 import { compressionMiddleware, compressionMetricsMiddleware } from './middleware/compression.js'
 import { metricsMiddleware, register } from './middleware/metrics.js'
+import { createMembersRouter } from './routes/admin/member.ts'
 
 const app = express()
 
@@ -103,6 +104,9 @@ app.use('/api/bulk', bulkRouter)
 
 // Admin API
 app.use('/api/admin', createAdminRouter())
+
+// Orgs APi
+app.use('/api/orgs/:orgId/members', createMembersRouter())
 
 const analyticsThresholdSeconds = Number(process.env.ANALYTICS_STALENESS_SECONDS ?? '300')
 const analyticsService = process.env.DATABASE_URL
