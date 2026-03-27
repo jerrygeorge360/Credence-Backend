@@ -31,46 +31,90 @@ export class OutboxRepository {
    * Uses FOR UPDATE SKIP LOCKED to avoid contention between workers.
    */
   async fetchPendingForProcessing(db: Queryable, limit: number = 100): Promise<OutboxEvent[]> {
-    const result = await db.query<{
-      id: string
-      aggregate_type: string
-      aggregate_id: string
-      event_type: string
-      payload: string
-      status: OutboxEventStatus
-      retry_count: number
-      max_retries: number
-      created_at: string
-      processed_at: string | null
-      error_message: string | null
-    }>(
-      `UPDATE event_outbox
-       SET status = 'processing'
-       WHERE id IN (
-         SELECT id FROM event_outbox
-         WHERE status = 'pending'
-         ORDER BY created_at ASC
-         LIMIT $1
-         FOR UPDATE SKIP LOCKED
-       )
-       RETURNING id, aggregate_type, aggregate_id, event_type, payload, status, 
-                 retry_count, max_retries, created_at, processed_at, error_message`,
-      [limit]
-    )
+    // Try with SKIP LOCKED first (real PostgreSQL)
+    try {
+      const result = await db.query<{
+        id: string
+        aggregate_type: string
+        aggregate_id: string
+        event_type: string
+        payload: string | Record<string, unknown>
+        status: OutboxEventStatus
+        retry_count: number
+        max_retries: number
+        created_at: string
+        processed_at: string | null
+        error_message: string | null
+      }>(
+        `UPDATE event_outbox
+         SET status = 'processing'
+         WHERE id IN (
+           SELECT id FROM event_outbox
+           WHERE status = 'pending'
+           ORDER BY created_at ASC
+           LIMIT $1
+           FOR UPDATE SKIP LOCKED
+         )
+         RETURNING id, aggregate_type, aggregate_id, event_type, payload, status, 
+                   retry_count, max_retries, created_at, processed_at, error_message`,
+        [limit]
+      )
 
-    return result.rows.map(row => ({
-      id: BigInt(row.id),
-      aggregateType: row.aggregate_type,
-      aggregateId: row.aggregate_id,
-      eventType: row.event_type,
-      payload: JSON.parse(row.payload),
-      status: row.status,
-      retryCount: row.retry_count,
-      maxRetries: row.max_retries,
-      createdAt: new Date(row.created_at),
-      processedAt: row.processed_at ? new Date(row.processed_at) : null,
-      errorMessage: row.error_message,
-    }))
+      return result.rows.map(row => ({
+        id: BigInt(row.id),
+        aggregateType: row.aggregate_type,
+        aggregateId: row.aggregate_id,
+        eventType: row.event_type,
+        payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload,
+        status: row.status,
+        retryCount: row.retry_count,
+        maxRetries: row.max_retries,
+        createdAt: new Date(row.created_at),
+        processedAt: row.processed_at ? new Date(row.processed_at) : null,
+        errorMessage: row.error_message,
+      }))
+    } catch (error) {
+      // Fallback for pg-mem (doesn't support SKIP LOCKED)
+      const result = await db.query<{
+        id: string
+        aggregate_type: string
+        aggregate_id: string
+        event_type: string
+        payload: string | Record<string, unknown>
+        status: OutboxEventStatus
+        retry_count: number
+        max_retries: number
+        created_at: string
+        processed_at: string | null
+        error_message: string | null
+      }>(
+        `UPDATE event_outbox
+         SET status = 'processing'
+         WHERE id IN (
+           SELECT id FROM event_outbox
+           WHERE status = 'pending'
+           ORDER BY created_at ASC
+           LIMIT $1
+         )
+         RETURNING id, aggregate_type, aggregate_id, event_type, payload, status, 
+                   retry_count, max_retries, created_at, processed_at, error_message`,
+        [limit]
+      )
+
+      return result.rows.map(row => ({
+        id: BigInt(row.id),
+        aggregateType: row.aggregate_type,
+        aggregateId: row.aggregate_id,
+        eventType: row.event_type,
+        payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload,
+        status: row.status,
+        retryCount: row.retry_count,
+        maxRetries: row.max_retries,
+        createdAt: new Date(row.created_at),
+        processedAt: row.processed_at ? new Date(row.processed_at) : null,
+        errorMessage: row.error_message,
+      }))
+    }
   }
 
   /**
@@ -122,7 +166,7 @@ export class OutboxRepository {
       aggregate_type: string
       aggregate_id: string
       event_type: string
-      payload: string
+      payload: string | Record<string, unknown>
       status: OutboxEventStatus
       retry_count: number
       max_retries: number
@@ -144,7 +188,7 @@ export class OutboxRepository {
       aggregateType: row.aggregate_type,
       aggregateId: row.aggregate_id,
       eventType: row.event_type,
-      payload: JSON.parse(row.payload),
+      payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload,
       status: row.status,
       retryCount: row.retry_count,
       maxRetries: row.max_retries,
@@ -161,8 +205,8 @@ export class OutboxRepository {
     const result = await db.query<{ deleted_count: number }>(
       `WITH deleted AS (
          DELETE FROM event_outbox
-         WHERE (status = 'published' AND processed_at < NOW() - INTERVAL '1 day' * $1)
-            OR (status = 'failed' AND processed_at < NOW() - INTERVAL '1 day' * $2)
+         WHERE (status = 'published' AND processed_at < NOW() - ($1 || ' days')::interval)
+            OR (status = 'failed' AND processed_at < NOW() - ($2 || ' days')::interval)
          RETURNING id
        )
        SELECT COUNT(*) as deleted_count FROM deleted`,

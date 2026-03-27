@@ -1,26 +1,46 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { Pool, PoolClient } from 'pg'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { newDb } from 'pg-mem'
+import type { IMemoryDb } from 'pg-mem'
+import { Pool } from 'pg'
 import { OutboxRepository } from './repository.js'
 import { OutboxPublisher, type EventPublisher } from './publisher.js'
 import { outboxEmitter } from './emitter.js'
-import { createOutboxSchema, dropOutboxSchema } from './schema.js'
+import { createOutboxSchema } from './schema.js'
 import type { OutboxEvent } from './types.js'
 
 describe('Outbox Integration Tests', () => {
+  let db: IMemoryDb
   let pool: Pool
   let repository: OutboxRepository
 
   beforeEach(async () => {
-    pool = new Pool({
-      connectionString: process.env.TEST_DB_URL || 'postgresql://localhost/credence_test',
+    db = newDb()
+    db.public.registerFunction({
+      name: 'current_database',
+      implementation: () => 'test',
     })
+    db.public.registerFunction({
+      name: 'version',
+      implementation: () => 'PostgreSQL 16.0',
+    })
+    db.public.registerFunction({
+      name: 'trim',
+      args: [{ type: 'text', name: 'str' }],
+      returns: 'text',
+      implementation: (str: string) => str?.trim() ?? '',
+    } as any)
+    db.public.registerFunction({
+      name: 'length',
+      args: [{ type: 'text', name: 'str' }],
+      returns: 'integer',
+      implementation: (str: string) => str?.length ?? 0,
+    } as any)
+    
+    const adapter = db.adapters.createPg()
+    pool = new adapter.Pool() as unknown as Pool
+    
     repository = new OutboxRepository()
     await createOutboxSchema(pool)
-  })
-
-  afterEach(async () => {
-    await dropOutboxSchema(pool)
-    await pool.end()
   })
 
   describe('Commit success + publish failure scenario', () => {

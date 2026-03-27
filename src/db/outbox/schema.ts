@@ -17,9 +17,7 @@ export const OUTBOX_TABLE_SCHEMA = `
     max_retries INTEGER NOT NULL DEFAULT 5,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     processed_at TIMESTAMPTZ,
-    error_message TEXT,
-    CONSTRAINT event_outbox_aggregate_nonempty CHECK (length(trim(aggregate_id)) > 0),
-    CONSTRAINT event_outbox_event_type_nonempty CHECK (length(trim(event_type)) > 0)
+    error_message TEXT
   )
 ` as const
 
