@@ -377,5 +377,118 @@ export function createAdminRouter(): Router {
     }
   })
 
+  /**
+   * POST /api/admin/impersonate
+   * 
+   * Issue a short-lived impersonation token
+   * 
+   * @requires Admin role
+   * 
+   * @body {string} targetUserId - User ID to impersonate
+   * @body {string} reason - Justification for impersonation
+   * @body {number} [ttlSeconds] - Token TTL (default: 900, max: 3600)
+   * 
+   * @returns {object} Impersonation token details
+   */
+  router.post('/impersonate', requireUserAuth, requireAdminRole, (req: Request, res: Response) => {
+    try {
+      const authReq = req as AuthenticatedRequest
+      const user = authReq.user!
+      const body = req.body as IssueImpersonationTokenRequest
+
+      if (!body.targetUserId || typeof body.targetUserId !== 'string') {
+        res.status(400).json({
+          error: 'InvalidRequest',
+          message: 'targetUserId is required and must be a string',
+        })
+        return
+      }
+
+      if (!body.reason || typeof body.reason !== 'string') {
+        res.status(400).json({
+          error: 'InvalidRequest',
+          message: 'reason is required and must be a string',
+        })
+        return
+      }
+
+      const result = impersonationService.issueToken(
+        user.id,
+        user.email,
+        body,
+        req.ip,
+      )
+
+      res.status(201).json({
+        success: true,
+        data: result,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      
+      if (message.includes('not found')) {
+        res.status(404).json({
+          error: 'NotFound',
+          message,
+        })
+        return
+      }
+
+      res.status(500).json({
+        error: 'InternalError',
+        message,
+      })
+    }
+  })
+
+  /**
+   * POST /api/admin/impersonate/:tokenId/revoke
+   * 
+   * Revoke an active impersonation token
+   * 
+   * @requires Admin role
+   * 
+   * @param {string} tokenId - Token ID to revoke
+   * 
+   * @returns {object} Revocation confirmation
+   */
+  router.post('/impersonate/:tokenId/revoke', requireUserAuth, requireAdminRole, (req: Request, res: Response) => {
+    try {
+      const authReq = req as AuthenticatedRequest
+      const user = authReq.user!
+      const { tokenId } = req.params
+
+      impersonationService.revokeToken(user.id, user.email, tokenId, req.ip)
+
+      res.status(200).json({
+        success: true,
+        message: `Token ${tokenId} has been revoked`,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      
+      if (message.includes('not found')) {
+        res.status(404).json({
+          error: 'NotFound',
+          message,
+        })
+        return
+      }
+
+      if (message.includes('already revoked')) {
+        res.status(400).json({
+          error: 'InvalidRequest',
+          message,
+        })
+        return
+      }
+
+      res.status(500).json({
+        error: 'InternalError',
+        message,
+      })
+    }
+  })
+
   return router
 }

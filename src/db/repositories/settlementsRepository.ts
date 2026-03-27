@@ -59,6 +59,13 @@ export class SettlementsRepository {
     const settledAt = input.settledAt ?? new Date()
     const status = input.status ?? 'pending'
 
+    // Check if record exists before insert to detect duplicates
+    const existingBefore = await this.db.query<{ id: string | number }>(
+      `SELECT id FROM settlements WHERE bond_id = $1 AND transaction_hash = $2`,
+      [input.bondId, input.transactionHash]
+    )
+    const isDuplicate = existingBefore.rows.length > 0
+
     const result = await this.db.query<SettlementRow>(
       `
       INSERT INTO settlements (bond_id, amount, transaction_hash, settled_at, status)
@@ -70,8 +77,7 @@ export class SettlementsRepository {
         settled_at = EXCLUDED.settled_at,
         updated_at = NOW()
       RETURNING id, bond_id, amount, transaction_hash, settled_at, status,
-                created_at, updated_at,
-                (xmax <> 0) AS is_duplicate
+                created_at, updated_at
       `,
       [input.bondId, input.amount, input.transactionHash, settledAt, status]
     )
@@ -79,7 +85,7 @@ export class SettlementsRepository {
     const row = result.rows[0]
     return {
       settlement: mapSettlement(row),
-      isDuplicate: row.is_duplicate === true,
+      isDuplicate,
     }
   }
 
