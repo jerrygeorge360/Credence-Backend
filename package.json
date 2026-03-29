@@ -15,7 +15,11 @@
     "migrate:create": "node-pg-migrate create -j ts -m src/migrations",
     "migrate": "node-pg-migrate -m dist/migrations up",
     "migrate:down": "node-pg-migrate -m dist/migrations down",
-    "migrate:dev": "npm run build && npm run migrate"
+    "migrate:dev": "npm run build && npm run migrate",
+    "migrate:lint": "tsx src/migrations/linter.ts check",
+    "migrate:preflight": "tsx src/migrations/linter.ts pre-flight",
+    "migrate:template": "tsx src/migrations/linter.ts template",
+    "migrate:safety": "tsx src/migrations/linter.ts check --strict"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.5.0",
