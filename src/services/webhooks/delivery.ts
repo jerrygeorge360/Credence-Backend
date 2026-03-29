@@ -1,5 +1,12 @@
 import { createHmac } from 'crypto'
-import { normalizeTransportError, isRetryableHttpStatus } from '../../clients/httpErrors.js'
+import {
+  getBackoffDelayMs,
+  resolveProviderRetryPolicy,
+  type ProviderRetryPolicies,
+  type RetryJitterStrategy,
+  type RetryPolicyOverrides,
+} from '../../lib/retryPolicy.js'
+import { logger } from '../../utils/logger.js'
 import type { WebhookConfig, WebhookPayload, WebhookDeliveryResult } from './types.js'
 
 /**
@@ -12,9 +19,33 @@ export interface DeliveryOptions {
   initialDelay?: number
   /** Backoff multiplier (default: 2). */
   backoffMultiplier?: number
+  /** Maximum backoff delay in ms (default: 10000). */
+  maxDelayMs?: number
+  /** Delay jitter strategy (default: none). */
+  jitterStrategy?: RetryJitterStrategy
   /** Request timeout in ms (default: 5000). */
   timeout?: number
+  /** Provider-aware retry policy overrides. */
+  retryPolicy?: RetryPolicyOverrides
+  /** Global retry policy map keyed by provider. */
+  retryPolicies?: ProviderRetryPolicies
+  /** Provider label for logging/policy lookup. Defaults to webhook. */
+  provider?: string
+  /** Internal/test hook for custom timing behavior. */
+  sleepFn?: (ms: number) => Promise<void>
+  /** Internal/test hook for deterministic jitter. */
+  randomFn?: () => number
+  /** Internal/test hook for injected fetch implementation. */
+  fetchFn?: typeof fetch
 }
+
+const DEFAULT_WEBHOOK_RETRY = {
+  maxAttempts: 4,
+  baseDelayMs: 1_000,
+  maxDelayMs: 10_000,
+  backoffMultiplier: 2,
+  jitterStrategy: 'none',
+} as const
 
 /**
  * Generate HMAC-SHA256 signature for webhook payload.
@@ -32,11 +63,35 @@ export async function deliverWebhook(
   options: DeliveryOptions = {}
 ): Promise<WebhookDeliveryResult> {
   const {
-    maxRetries = 3,
-    initialDelay = 1000,
-    backoffMultiplier = 2,
+    maxRetries,
+    initialDelay,
+    backoffMultiplier,
+    maxDelayMs,
+    jitterStrategy,
     timeout = 5000,
+    retryPolicy,
+    retryPolicies,
+    provider = 'webhook',
+    sleepFn = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    randomFn = Math.random,
+    fetchFn = fetch,
   } = options
+
+  const legacyOverrides: RetryPolicyOverrides = {
+    maxAttempts: maxRetries !== undefined ? maxRetries + 1 : undefined,
+    baseDelayMs: initialDelay,
+    maxDelayMs,
+    backoffMultiplier,
+    jitterStrategy,
+  }
+
+  const policy = resolveProviderRetryPolicy(provider, DEFAULT_WEBHOOK_RETRY, {
+    providerPolicies: retryPolicies,
+    overrides: {
+      ...legacyOverrides,
+      ...(retryPolicy ?? {}),
+    },
+  })
 
   const payloadStr = JSON.stringify(payload)
   const signature = signPayload(payloadStr, webhook.secret)
@@ -44,14 +99,13 @@ export async function deliverWebhook(
   let attempts = 0
   let lastError: string | undefined
 
-  for (let i = 0; i <= maxRetries; i++) {
-    attempts++
-
+  for (let attempt = 1; attempt <= policy.maxAttempts; attempt++) {
+    attempts = attempt
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), timeout)
 
     try {
-      const response = await fetch(webhook.url, {
+      const response = await fetchFn(webhook.url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -73,30 +127,22 @@ export async function deliverWebhook(
 
       lastError = `HTTP ${response.status}`
 
-      // 4xx errors are non-retriable: the server rejected the request and
-      // repeating it will not change the outcome (except 408/429 which are
-      // transient and handled by isRetryableHttpStatus).
-      if (!isRetryableHttpStatus(response.status)) {
+      // Don't retry on 4xx errors (client errors)
+      if (response.status >= 400 && response.status < 500) {
         break
       }
     } catch (err) {
-      // Normalize to a structured transport error so timeout and connection-reset
-      // are classified consistently rather than left as raw exception messages.
-      const transport = normalizeTransportError(err)
-      lastError = transport
-        ? `${transport.code}: ${transport.message}`
-        : (err instanceof Error ? err.message : 'Unknown error')
+      lastError = err instanceof Error ? err.message : 'Unknown error'
     } finally {
-      // Always clear the abort timer regardless of success, failure, or throw.
-      // Without this, every failed attempt leaks a dangling timer that fires
-      // against an already-completed AbortController.
       clearTimeout(timeoutId)
     }
 
-    // Wait before retry (except on last attempt)
-    if (i < maxRetries) {
-      const delay = initialDelay * Math.pow(backoffMultiplier, i)
-      await new Promise(resolve => setTimeout(resolve, delay))
+    if (attempt < policy.maxAttempts) {
+      const delay = getBackoffDelayMs(policy, attempt, randomFn)
+      logger.info(
+        `Retrying outbound request provider=${provider} attempt=${attempt + 1}/${policy.maxAttempts} delayMs=${delay} webhookId=${webhook.id} error=${lastError ?? 'unknown'}`,
+      )
+      await sleepFn(delay)
     }
   }
 

@@ -1,8 +1,21 @@
 import { Router, Request, Response } from 'express'
 import { AuthenticatedRequest, requireUserAuth, requireAdminRole, UserRole } from '../../middleware/auth.js'
+import {
+  buildPaginationMeta,
+  PaginationValidationError,
+  parsePaginationParams,
+} from '../../lib/pagination.js'
 import { AdminService } from '../../services/admin/index.js'
 import { auditLogService } from '../../services/audit/index.js'
+import { impersonationService } from '../../services/impersonation/index.js'
 import type { AssignRoleRequest, RevokeApiKeyRequest } from '../../services/admin/types.js'
+import type { IssueImpersonationTokenRequest } from '../../services/impersonation/types.js'
+import { ReplayService } from '../../services/replayService.js'
+import { FailedInboundEventsRepository } from '../../db/repositories/failedInboundEventsRepository.js'
+import { registerAllReplayHandlers } from '../../services/replayHandlers.js'
+import { IdentityRepository } from '../../db/repositories/identityRepository.js'
+import { BondsRepository } from '../../db/repositories/bondsRepository.js'
+import { pool } from '../../db/pool.js'
 
 /**
  * Create the admin router with role and user management endpoints
@@ -11,6 +24,16 @@ import type { AssignRoleRequest, RevokeApiKeyRequest } from '../../services/admi
 export function createAdminRouter(): Router {
   const router = Router()
   const adminService = new AdminService(auditLogService)
+  
+  // Replay Service Setup
+  const replayRepo = new FailedInboundEventsRepository(pool)
+  const replayService = new ReplayService(replayRepo)
+  
+  const identityRepo = new IdentityRepository(pool)
+  const bondsRepo = new BondsRepository(pool)
+  
+  // Register handlers
+  registerAllReplayHandlers(replayService, identityRepo, bondsRepo)
 
   /**
    * GET /api/admin/users
@@ -33,16 +56,30 @@ export function createAdminRouter(): Router {
    * 
    * @returns {object} List of users with pagination info
    */
-  router.get('/users', requireUserAuth, requireAdminRole, (req: Request, res: Response) => {
+  router.get('/users', requireUserAuth, requireAdminRole, async (req: Request, res: Response) => {
     try {
       const authReq = req as AuthenticatedRequest
       const user = authReq.user!
 
-      // Parse pagination parameters
-      const limit = Math.min(parseInt(req.query.limit as string) || 50, 100)
-      const offset = parseInt(req.query.offset as string) || 0
+      let pagination
+      try {
+        pagination = parsePaginationParams(req.query as Record<string, unknown>, { defaultLimit: 50 })
+      } catch (error) {
+        if (error instanceof PaginationValidationError) {
+          res.status(400).json({
+            error: 'InvalidRequest',
+            message: 'Invalid pagination parameters',
+            details: error.details,
+          })
+          return
+        }
 
-      if (limit < 1 || offset < 0) {
+        throw error
+      }
+
+      const { page, limit, offset } = pagination
+
+      if (page < 1 || limit < 1 || offset < 0) {
         res.status(400).json({
           error: 'InvalidRequest',
           message: 'Invalid pagination parameters',
@@ -68,11 +105,14 @@ export function createAdminRouter(): Router {
       }
 
       // Get users
-      const result = adminService.listUsers(user.id, user.email, { limit, offset }, filters)
+      const result = await adminService.listUsers(user.id, user.email, { page, limit, offset }, filters)
 
       res.status(200).json({
         success: true,
-        data: result,
+        data: {
+          ...result,
+          ...buildPaginationMeta(result.total, page, limit),
+        },
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
@@ -104,7 +144,7 @@ export function createAdminRouter(): Router {
    * 
    * @returns {object} Updated user info
    */
-  router.post('/roles/assign', requireUserAuth, requireAdminRole, (req: Request, res: Response) => {
+  router.post('/roles/assign', requireUserAuth, requireAdminRole, async (req: Request, res: Response) => {
     try {
       const authReq = req as AuthenticatedRequest
       const user = authReq.user!
@@ -119,7 +159,7 @@ export function createAdminRouter(): Router {
         return
       }
 
-      const result = adminService.assignRole(user.id, user.email, assignRequest)
+      const result = await adminService.assignRole(user.id, user.email, assignRequest)
 
       res.status(200).json({
         success: true,
@@ -156,7 +196,7 @@ export function createAdminRouter(): Router {
    * 
    * @returns {object} Revocation confirmation
    */
-  router.post('/keys/revoke', requireUserAuth, requireAdminRole, (req: Request, res: Response) => {
+  router.post('/keys/revoke', requireUserAuth, requireAdminRole, async (req: Request, res: Response) => {
     try {
       const authReq = req as AuthenticatedRequest
       const user = authReq.user!
@@ -171,7 +211,7 @@ export function createAdminRouter(): Router {
         return
       }
 
-      const result = adminService.revokeApiKey(user.id, user.email, revokeRequest)
+      const result = await adminService.revokeApiKey(user.id, user.email, revokeRequest)
 
       res.status(200).json({
         success: true,
@@ -209,16 +249,30 @@ export function createAdminRouter(): Router {
    * 
    * @returns {object} Array of audit log entries
    */
-  router.get('/audit-logs', requireUserAuth, requireAdminRole, (req: Request, res: Response) => {
+  router.get('/audit-logs', requireUserAuth, requireAdminRole, async (req: Request, res: Response) => {
     try {
       const authReq = req as AuthenticatedRequest
       const user = authReq.user!
 
-      // Parse pagination
-      const limit = Math.min(parseInt(req.query.limit as string) || 50, 100)
-      const offset = parseInt(req.query.offset as string) || 0
+      let pagination
+      try {
+        pagination = parsePaginationParams(req.query as Record<string, unknown>, { defaultLimit: 50 })
+      } catch (error) {
+        if (error instanceof PaginationValidationError) {
+          res.status(400).json({
+            error: 'InvalidRequest',
+            message: 'Invalid pagination parameters',
+            details: error.details,
+          })
+          return
+        }
 
-      if (limit < 1 || offset < 0) {
+        throw error
+      }
+
+      const { page, limit, offset } = pagination
+
+      if (page < 1 || limit < 1 || offset < 0) {
         res.status(400).json({
           error: 'InvalidRequest',
           message: 'Invalid pagination parameters',
@@ -230,14 +284,22 @@ export function createAdminRouter(): Router {
       const filters: any = {}
       if (req.query.action) filters.action = req.query.action
       if (req.query.adminId) filters.adminId = req.query.adminId
+      if (req.query.actorId) filters.actorId = req.query.actorId
       if (req.query.targetUserId) filters.targetUserId = req.query.targetUserId
+      if (req.query.resourceId) filters.resourceId = req.query.resourceId
+      if (req.query.resourceType) filters.resourceType = req.query.resourceType
       if (req.query.status) filters.status = req.query.status
+      if (req.query.from) filters.from = req.query.from
+      if (req.query.to) filters.to = req.query.to
 
-      const result = adminService.getAuditLogs(user.id, user.email, filters, limit, offset)
+      const result = await adminService.getAuditLogs(user.id, user.email, filters, limit, offset)
 
       res.status(200).json({
         success: true,
-        data: result,
+        data: {
+          ...result,
+          ...buildPaginationMeta(result.total, page, limit),
+        },
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
@@ -245,6 +307,143 @@ export function createAdminRouter(): Router {
         error: 'InternalError',
         message,
       })
+    }
+  })
+
+  /**
+   * GET /api/admin/audit-logs/export
+   * 
+   * Export audit logs as NDJSON stream
+   * 
+   * Query parameters:
+   * - startDate: ISO date string for start of range
+   * - endDate: ISO date string for end of range
+   * 
+   * @requires Admin role
+   */
+  router.get('/audit-logs/export', requireUserAuth, requireAdminRole, async (req: Request, res: Response) => {
+    try {
+      const authReq = req as AuthenticatedRequest
+      const user = authReq.user!
+
+      if (!req.query.startDate || !req.query.endDate) {
+        res.status(400).json({
+          error: 'InvalidRequest',
+          message: 'Missing required query parameters: startDate, endDate',
+        })
+        return
+      }
+
+      const startDate = new Date(req.query.startDate as string)
+      const endDate = new Date(req.query.endDate as string)
+
+      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+        res.status(400).json({
+          error: 'InvalidRequest',
+          message: 'Invalid date format. Use ISO strings.',
+        })
+        return
+      }
+      
+      if (startDate > endDate) {
+        res.status(400).json({
+          error: 'InvalidRequest',
+          message: 'startDate must be before or equal to endDate',
+        })
+        return
+      }
+
+      const stream = adminService.exportAuditLogs(user.id, user.email, startDate, endDate)
+
+      // Set headers for NDJSON streaming
+      res.setHeader('Content-Type', 'application/x-ndjson')
+      res.setHeader('Content-Disposition', 'attachment; filename="audit-logs.ndjson"')
+      
+      // Write metadata header
+      const metadata = {
+        _meta: {
+          exportedAt: new Date().toISOString(),
+          exportedBy: user.email,
+          dateRange: {
+            start: startDate.toISOString(),
+            end: endDate.toISOString()
+          },
+          schemaVersion: "1.0"
+        }
+      }
+      res.write(JSON.stringify(metadata) + '\n')
+
+      // Iterate over async generator and stream results
+      let count = 0
+      for await (const log of stream) {
+        res.write(JSON.stringify(log) + '\n')
+        count++
+      }
+
+      // Log completion
+      adminService.logExportCompletion(user.id, user.email, startDate, endDate, count)
+
+      res.end()
+    } catch (error) {
+      if (!res.headersSent) {
+        const message = error instanceof Error ? error.message : 'Unknown error'
+        res.status(500).json({
+          error: 'InternalError',
+          message,
+        })
+      } else {
+        // Stream already started, close it forcefully
+        res.end()
+      }
+    }
+  })
+
+  /**
+   * GET /api/admin/events/failed
+   * 
+   * List failed inbound events for review
+   */
+  router.get('/events/failed', requireUserAuth, requireAdminRole, async (req: Request, res: Response) => {
+    try {
+      const filters: any = {}
+      if (req.query.status) filters.status = req.query.status
+      if (req.query.type) filters.type = req.query.type
+
+      const limit = parseInt(req.query.limit as string) || 50
+      const offset = parseInt(req.query.offset as string) || 0
+
+      const result = await replayService.listFailedEvents(filters, limit, offset)
+      
+      res.status(200).json({
+        success: true,
+        data: result
+      })
+    } catch (error: any) {
+      res.status(500).json({ error: 'InternalError', message: error.message })
+    }
+  })
+
+  /**
+   * POST /api/admin/events/replay/:id
+   * 
+   * Replay a specific failed event
+   */
+  router.post('/events/replay/:id', requireUserAuth, requireAdminRole, async (req: Request, res: Response) => {
+    try {
+      const authReq = req as AuthenticatedRequest
+      const admin = authReq.user!
+      const id = req.params.id
+
+      const result = await replayService.replayEvent(
+        id,
+        admin.id,
+        admin.email,
+        req.ip
+      )
+
+      res.status(200).json(result)
+    } catch (error: any) {
+      res.status(400).json({ error: 'ReplayFailed', message: error.message })
     }
   })
 

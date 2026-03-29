@@ -11,12 +11,16 @@
 
     "sourceMap": true,
     "allowImportingTsExtensions": true,
-    "noEmit": true
+    "noEmit": true,
+    "types": ["node", "express", "pg", "vitest"]
   },
   "include": ["src"],
   "exclude": [
     "node_modules",
     "dist",
-    "tests"
+    "tests",
+    "src/__tests__/**",
+    "src/**/*.test.ts",
+    "src/**/*.spec.ts"
   ]
 }
