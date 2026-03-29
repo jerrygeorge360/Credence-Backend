@@ -10,6 +10,7 @@ import { createAnalyticsRouter } from './routes/analytics.js'
 import { AnalyticsService } from './services/analytics/service.js'
 import { pool } from './db/pool.js'
 import { validate } from './middleware/validate.js'
+import { requestIdMiddleware } from './middleware/requestId.js'
 import {
   buildPaginationMeta,
   PaginationValidationError,
@@ -25,6 +26,9 @@ import { metricsMiddleware, register } from './middleware/metrics.js'
 import { createMembersRouter } from './routes/admin/member.ts'
 
 const app = express()
+
+// Request context and correlation IDs
+app.use(requestIdMiddleware)
 
 // Metrics endpoint for Prometheus
 app.get('/metrics', async (_req, res) => {
