@@ -34,6 +34,33 @@ export const envSchema = z.object({
     .min(32, { message: 'JWT_SECRET must be at least 32 characters' }),
   JWT_EXPIRY: z.string().default('1h'),
 
+  // JWT key rotation
+  KEY_ROTATION_INTERVAL_SECONDS: z
+    .string()
+    .default('86400')
+    .transform(Number)
+    .pipe(z.number().int().positive()),
+  KEY_GRACE_PERIOD_SECONDS: z
+    .string()
+    .default('3600')
+    .transform(Number)
+    .pipe(z.number().int().nonnegative()),
+  /**
+   * Clock skew tolerance in seconds.
+   * Added to the grace window before a retired key is hard-pruned, and passed
+   * as `clockTolerance` to jwtVerify() so tokens from slightly-fast clocks verify.
+   * Default: 300 (5 minutes).
+   */
+  KEY_CLOCK_SKEW_SECONDS: z
+    .string()
+    .default('300')
+    .transform(Number)
+    .pipe(z.number().int().nonnegative()),
+
+  // JWT key rotation — private key source
+  KEY_PRIVATE_PEM: z.string().optional(),
+  KEY_INITIAL_KID: z.string().optional(),
+
   // Feature flags
   ENABLE_TRUST_SCORING: z
     .string()
@@ -86,6 +113,17 @@ export interface Config {
   jwt: {
     secret: string
     expiry: string
+    keyRotationIntervalSeconds: number
+    gracePeriodSeconds: number
+    /** Clock skew tolerance (seconds) for JWT verification and grace-period pruning. */
+    clockSkewSeconds: number
+    /**
+     * Optional PKCS8 PEM-encoded private key loaded from a secret source.
+     * When set, the KeyManager imports this key on startup instead of generating one.
+     */
+    privateKeyPem?: string
+    /** Optional kid assigned to the key loaded from privateKeyPem. */
+    initialKid?: string
   }
   features: {
     trustScoring: boolean
@@ -175,6 +213,11 @@ function mapEnvToConfig(env: Env): Config {
     jwt: {
       secret: env.JWT_SECRET,
       expiry: env.JWT_EXPIRY,
+      keyRotationIntervalSeconds: env.KEY_ROTATION_INTERVAL_SECONDS,
+      gracePeriodSeconds: env.KEY_GRACE_PERIOD_SECONDS,
+      clockSkewSeconds: env.KEY_CLOCK_SKEW_SECONDS,
+      privateKeyPem: env.KEY_PRIVATE_PEM,
+      initialKid: env.KEY_INITIAL_KID,
     },
     features: {
       trustScoring: env.ENABLE_TRUST_SCORING,

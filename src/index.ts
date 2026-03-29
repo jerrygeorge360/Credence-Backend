@@ -8,6 +8,7 @@ import { loadConfig } from './config/index.js'
 import { pool } from './db/pool.js'
 import { AnalyticsService } from './services/analytics/service.js'
 import { AnalyticsRefreshWorker, getAnalyticsRefreshIntervalMs } from './jobs/analyticsRefreshWorker.js'
+import { keyManager } from './services/keyManager/index.js'
 
 app.use('/api/admin', createAdminRouter())
 app.use('/api/governance', governanceRouter)
